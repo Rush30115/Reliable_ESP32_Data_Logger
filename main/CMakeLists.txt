@@ -14,7 +14,11 @@ idf_component_register(
         "display_test.c"
         "sht40.c"
     INCLUDE_DIRS "."
-    EMBED_TXTFILES "certs/server_cert.pem"
+    EMBED_TXTFILES 
+        "certs/server_cert.pem"
+        "certs/AmazonRootCA1.pem"
+        "certs/device.cert.pem"
+        "certs/device.private.key"
     REQUIRES 
         nvs_flash 
         esp_wifi 

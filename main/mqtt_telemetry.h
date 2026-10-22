@@ -9,26 +9,30 @@
 extern "C" {
 #endif
 
-#define UBIDOTS_BROKER_URI    "mqtt://industrial.api.ubidots.com:1883"
-#define UBIDOTS_TOKEN         "BBUS-ojkkNHhIpShPFMpEAIp8zLiEMGG8CN"
-#define UBIDOTS_DEVICE_ID     "6abc9ebb6119b2dce8e77571"
-#define UBIDOTS_DEVICE_LABEL  "data-logger"
-#define UBIDOTS_PUB_TOPIC     "/v1.6/devices/data-logger"
-#define MQTT_THRESHOLD_TOPIC  "device/threshold"
-#define UBIDOTS_SUB_THRESHOLD_TOPIC "/v1.6/devices/data-logger/threshold/lv"
+// ==========================================
+// AWS IoT Core Configuration (ap-southeast-2)
+// ==========================================
+#define AWS_IOT_ENDPOINT        "a356plyaavkv83-ats.iot.ap-southeast-2.amazonaws.com"
+#define AWS_IOT_BROKER_URI      "mqtts://" AWS_IOT_ENDPOINT ":8883"
+#define AWS_IOT_CLIENT_ID       "reliable-data-logger-01"
+
+// Topic Architecture
+#define AWS_IOT_TOPIC_TELEMETRY "devices/reliable-data-logger-01/telemetry"
+#define AWS_IOT_TOPIC_COMMANDS  "devices/reliable-data-logger-01/commands/#"
+#define AWS_IOT_TOPIC_STATUS    "devices/reliable-data-logger-01/status"
 
 /**
- * @brief Initialize Ubidots MQTT telemetry client.
+ * @brief Initialize AWS IoT Core MQTT telemetry client using mTLS.
  */
-esp_err_t mqtt_telemetry_init(const char *broker_uri, const char *token, const char *device_label);
+esp_err_t mqtt_telemetry_init(const char *broker_uri, const char *client_id);
 
 /**
- * @brief Check if MQTT broker connection to Ubidots is active.
+ * @brief Check if connection to AWS IoT Core is active.
  */
 bool mqtt_telemetry_is_connected(void);
 
 /**
- * @brief Publish a single sensor record as an Ubidots-compliant timestamped JSON payload over MQTT.
+ * @brief Publish a single sensor record to AWS IoT Core over mTLS.
  */
 esp_err_t mqtt_telemetry_publish_record(const sensor_record_t *record);
 

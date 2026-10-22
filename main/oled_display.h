@@ -46,6 +46,13 @@ void oled_display_show_sensor_data(float temp, float hum, float pressure, bool v
 void oled_display_show_message(const char *line1, const char *line2, const char *line3);
 
 /**
+ * @brief Set the firmware version badge displayed on the OLED top header bar.
+ * 
+ * @param version_str Short version label (e.g. "APP v1.0 [GRN]")
+ */
+void oled_display_set_fw_version(const char *version_str);
+
+/**
  * @brief Clear OLED buffer and update screen.
  */
 void oled_display_clear(void);

@@ -6,3 +6,11 @@ sdkconfig.old
 *.elf
 .vscode/
 __pycache__/
+
+# AWS IoT Credentials
+main/certs/*.key
+main/certs/*.private.key
+main/certs/device.cert.pem
+
+# Private Wi-Fi credentials
+main/wifi_credentials.h

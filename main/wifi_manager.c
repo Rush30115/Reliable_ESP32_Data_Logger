@@ -1,4 +1,5 @@
 #include "wifi_manager.h"
+#include "wifi_credentials.h"
 #include "esp_wifi.h"
 #include "esp_event.h"
 #include "esp_log.h"
@@ -22,7 +23,26 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base,
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
         s_is_connected = false;
         s_wifi_state = WIFI_STATE_CONNECTING;
-        ESP_LOGW(TAG, "Wi-Fi disconnected. Reconnecting to AP...");
+        s_retry_num++;
+        if (s_retry_num == 3) {
+            wifi_config_t cur_conf;
+            if (esp_wifi_get_config(WIFI_IF_STA, &cur_conf) == ESP_OK) {
+                if (strcmp((char *)cur_conf.sta.ssid, "Wokwi-GUEST") == 0) {
+                    strncpy((char *)cur_conf.sta.ssid, WIFI_SSID, sizeof(cur_conf.sta.ssid) - 1);
+                    strncpy((char *)cur_conf.sta.password, WIFI_PASS, sizeof(cur_conf.sta.password) - 1);
+                    cur_conf.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
+                    esp_wifi_set_config(WIFI_IF_STA, &cur_conf);
+                    ESP_LOGW(TAG, "AP Wokwi-GUEST not reachable. Switched to hardware AP: %s", WIFI_SSID);
+                } else {
+                    strncpy((char *)cur_conf.sta.ssid, "Wokwi-GUEST", sizeof(cur_conf.sta.ssid) - 1);
+                    cur_conf.sta.password[0] = '\0';
+                    cur_conf.sta.threshold.authmode = WIFI_AUTH_OPEN;
+                    esp_wifi_set_config(WIFI_IF_STA, &cur_conf);
+                    ESP_LOGW(TAG, "Hardware AP not reachable. Switched to virtual AP: Wokwi-GUEST");
+                }
+            }
+        }
+        ESP_LOGW(TAG, "Wi-Fi disconnected. Reconnecting to AP (retry %lu)...", (unsigned long)s_retry_num);
         esp_wifi_connect();
     } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t* event = (ip_event_got_ip_t*) event_data;

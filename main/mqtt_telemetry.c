@@ -13,48 +13,51 @@
 #include <string.h>
 #include <stdio.h>
 
-static const char *TAG = "MQTT_TELEMETRY";
+static const char *TAG = "AWS_IOT_MQTT";
+
+// Binary symbols embedded via CMake EMBED_TXTFILES
+extern const uint8_t root_ca_pem_start[]   asm("_binary_AmazonRootCA1_pem_start");
+extern const uint8_t device_cert_pem_start[] asm("_binary_device_cert_pem_start");
+extern const uint8_t device_key_pem_start[]  asm("_binary_device_private_key_start");
 
 static esp_mqtt_client_handle_t s_mqtt_client = NULL;
 static bool s_is_mqtt_connected = false;
-static char s_pub_topic[128] = UBIDOTS_PUB_TOPIC;
+static char s_pub_topic[128] = AWS_IOT_TOPIC_TELEMETRY;
 
 static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_t event_id, void *event_data)
 {
     esp_mqtt_event_handle_t event = event_data;
     switch ((esp_mqtt_event_id_t)event_id) {
     case MQTT_EVENT_CONNECTED:
-        ESP_LOGI(TAG, "Successfully Connected to MQTT Broker!");
+        ESP_LOGI(TAG, "🔒 Successfully Connected to AWS IoT Core (mTLS Secured)!");
         s_is_mqtt_connected = true;
 
-        // Bi-directional MQTT: Subscribe to threshold configuration topics
-        int msg_id1 = esp_mqtt_client_subscribe(s_mqtt_client, MQTT_THRESHOLD_TOPIC, 0);
-        int msg_id2 = esp_mqtt_client_subscribe(s_mqtt_client, UBIDOTS_SUB_THRESHOLD_TOPIC, 0);
-        ESP_LOGI(TAG, "Subscribed to Threshold Topic '%s' (msg_id=%d) & Ubidots Topic '%s' (msg_id=%d)",
-                 MQTT_THRESHOLD_TOPIC, msg_id1, UBIDOTS_SUB_THRESHOLD_TOPIC, msg_id2);
+        // Subscribe to device commands topic namespace
+        int msg_id = esp_mqtt_client_subscribe(s_mqtt_client, AWS_IOT_TOPIC_COMMANDS, 1);
+        ESP_LOGI(TAG, "Subscribed to AWS IoT Command Topic: '%s' (msg_id=%d)", AWS_IOT_TOPIC_COMMANDS, msg_id);
         break;
 
     case MQTT_EVENT_DISCONNECTED:
-        ESP_LOGW(TAG, "Disconnected from MQTT Broker");
+        ESP_LOGW(TAG, "Disconnected from AWS IoT Core");
         s_is_mqtt_connected = false;
         break;
 
     case MQTT_EVENT_DATA: {
-        ESP_LOGI(TAG, "📩 MQTT DATA RECEIVED | Topic: %.*s | Payload: %.*s",
+        ESP_LOGI(TAG, "📩 AWS IoT Downlink Message | Topic: %.*s | Payload: %.*s",
                  event->topic_len, event->topic, event->data_len, event->data);
 
         char topic_buf[128] = {0};
-        char payload_buf[128] = {0};
+        char payload_buf[256] = {0};
         int t_len = (event->topic_len < (int)sizeof(topic_buf) - 1) ? event->topic_len : (int)sizeof(topic_buf) - 1;
         int p_len = (event->data_len < (int)sizeof(payload_buf) - 1) ? event->data_len : (int)sizeof(payload_buf) - 1;
         memcpy(topic_buf, event->topic, t_len);
         memcpy(payload_buf, event->data, p_len);
 
-        if (strstr(topic_buf, "threshold") != NULL) {
+        // Command processing: Dynamic Pressure Threshold adjustment
+        if (strstr(topic_buf, "threshold") != NULL || strstr(payload_buf, "threshold") != NULL) {
             float new_thresh = 0.0f;
             bool valid = false;
 
-            // Attempt JSON parsing
             cJSON *json = cJSON_Parse(payload_buf);
             if (json) {
                 cJSON *item = cJSON_GetObjectItem(json, "threshold");
@@ -66,7 +69,6 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
                 cJSON_Delete(json);
             }
 
-            // Fallback: raw numeric string parsing
             if (!valid) {
                 char *endptr = NULL;
                 float parsed = strtof(payload_buf, &endptr);
@@ -77,27 +79,33 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
             }
 
             if (valid) {
-                ESP_LOGI(TAG, "⚡ Dynamic Threshold Updated via MQTT: %.2f", new_thresh);
+                ESP_LOGI(TAG, "⚡ Dynamic Threshold Updated via AWS IoT: %.2f bar", new_thresh);
                 valve_control_set_threshold(new_thresh);
 
-                // Immediate re-evaluation of valve state against current pressure reading
                 float cur_p = sensor_engine_get_last_pressure();
                 bool valve_on = valve_control_evaluate(cur_p);
-                ESP_LOGI(TAG, "Re-evaluation complete: Current Pressure %.2f vs Threshold %.2f -> Valve %s",
+                ESP_LOGI(TAG, "Threshold Applied: Current Pressure %.2f vs Threshold %.2f -> Valve %s",
                          cur_p, new_thresh, valve_on ? "HIGH (OPEN)" : "LOW (CLOSED)");
             } else {
-                ESP_LOGW(TAG, "Failed to parse threshold payload: '%s'", payload_buf);
+                ESP_LOGW(TAG, "Failed to parse threshold from AWS IoT payload: '%s'", payload_buf);
             }
+        }
+
+        // Command processing: Over-The-Air (OTA) update trigger
+        if (strstr(topic_buf, "ota") != NULL || strstr(payload_buf, "ota") != NULL) {
+            ESP_LOGI(TAG, "⚡ Remote AWS IoT OTA Command Received! Triggering update...");
+            extern void ota_trigger_update(void);
+            ota_trigger_update();
         }
         break;
     }
 
     case MQTT_EVENT_PUBLISHED:
-        ESP_LOGD(TAG, "MQTT Telemetry Payload Delivered (msg_id=%d)", event->msg_id);
+        ESP_LOGI(TAG, "🟢 [PUBACK RECEIVED] AWS IoT Confirmed Delivery! (msg_id=%d)", event->msg_id);
         break;
 
     case MQTT_EVENT_ERROR:
-        ESP_LOGE(TAG, "MQTT Event Error encountered");
+        ESP_LOGE(TAG, "AWS IoT MQTT Event Error encountered (type=%d)", event->error_handle->error_type);
         break;
 
     default:
@@ -105,34 +113,39 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
     }
 }
 
-esp_err_t mqtt_telemetry_init(const char *broker_uri, const char *token, const char *device_label)
+esp_err_t mqtt_telemetry_init(const char *broker_uri, const char *client_id)
 {
-    const char *uri = broker_uri ? broker_uri : UBIDOTS_BROKER_URI;
-    const char *auth_token = token ? token : UBIDOTS_TOKEN;
-    const char *dev_label = device_label ? device_label : UBIDOTS_DEVICE_LABEL;
+    const char *uri = broker_uri ? broker_uri : AWS_IOT_BROKER_URI;
+    const char *cli_id = client_id ? client_id : AWS_IOT_CLIENT_ID;
 
-    snprintf(s_pub_topic, sizeof(s_pub_topic), "/v1.6/devices/%s", dev_label);
-    ESP_LOGI(TAG, "Initializing MQTT Client [Broker: %s, Device: %s, Pub Topic: %s]",
-             uri, dev_label, s_pub_topic);
+    snprintf(s_pub_topic, sizeof(s_pub_topic), "devices/%s/telemetry", cli_id);
+    ESP_LOGI(TAG, "Initializing AWS IoT MQTT Client (mTLS)\n - Endpoint: %s\n - ClientID: %s\n - Pub Topic: %s",
+             uri, cli_id, s_pub_topic);
 
     esp_mqtt_client_config_t mqtt_cfg = {
         .broker = {
             .address = {
-                .uri = uri
-            }
+                .uri = uri,
+            },
+            .verification = {
+                .certificate = (const char *)root_ca_pem_start,
+            },
         },
         .credentials = {
-            .username = auth_token,
-            .client_id = dev_label,
+            .client_id = cli_id,
             .authentication = {
-                .password = auth_token
-            }
-        }
+                .certificate = (const char *)device_cert_pem_start,
+                .key = (const char *)device_key_pem_start,
+            },
+        },
+        .session = {
+            .keepalive = 60,
+        },
     };
 
     s_mqtt_client = esp_mqtt_client_init(&mqtt_cfg);
     if (!s_mqtt_client) {
-        ESP_LOGE(TAG, "Failed to initialize ESP-IDF MQTT client");
+        ESP_LOGE(TAG, "Failed to initialize ESP-IDF MQTT client for AWS IoT");
         return ESP_FAIL;
     }
 
@@ -155,47 +168,17 @@ esp_err_t mqtt_telemetry_publish_record(const sensor_record_t *record)
     if (!root) return ESP_ERR_NO_MEM;
 
     uint64_t timestamp_ms = record->timestamp_us / 1000;
-    bool has_valid_epoch = (timestamp_ms > 1600000000000ULL);
 
-    float pressure_val = record->pressure;
-    float hum_val = record->humidity;
-    float batt_val = record->battery_mv;
-    int valve_state_val = valve_control_get_state() ? 1 : 0;
-    float threshold_val = valve_control_get_threshold();
-
-    if (has_valid_epoch) {
-        cJSON *p_obj = cJSON_CreateObject();
-        cJSON_AddNumberToObject(p_obj, "value", pressure_val);
-        cJSON_AddNumberToObject(p_obj, "timestamp", (double)timestamp_ms);
-        cJSON_AddItemToObject(root, "pressure", p_obj);
-
-        cJSON *h_obj = cJSON_CreateObject();
-        cJSON_AddNumberToObject(h_obj, "value", hum_val);
-        cJSON_AddNumberToObject(h_obj, "timestamp", (double)timestamp_ms);
-        cJSON_AddItemToObject(root, "humidity", h_obj);
-
-        cJSON *b_obj = cJSON_CreateObject();
-        cJSON_AddNumberToObject(b_obj, "value", batt_val);
-        cJSON_AddNumberToObject(b_obj, "timestamp", (double)timestamp_ms);
-        cJSON_AddItemToObject(root, "battery", b_obj);
-
-        cJSON *v_obj = cJSON_CreateObject();
-        cJSON_AddNumberToObject(v_obj, "value", valve_state_val);
-        cJSON_AddNumberToObject(v_obj, "timestamp", (double)timestamp_ms);
-        cJSON_AddItemToObject(root, "valve_state", v_obj);
-
-        cJSON *t_obj = cJSON_CreateObject();
-        cJSON_AddNumberToObject(t_obj, "value", threshold_val);
-        cJSON_AddNumberToObject(t_obj, "timestamp", (double)timestamp_ms);
-        cJSON_AddItemToObject(root, "threshold", t_obj);
-    } else {
-        cJSON_AddNumberToObject(root, "pressure", pressure_val);
-        cJSON_AddNumberToObject(root, "temperature", record->temperature); // alias for backwards compatibility
-        cJSON_AddNumberToObject(root, "humidity", hum_val);
-        cJSON_AddNumberToObject(root, "battery", batt_val);
-        cJSON_AddNumberToObject(root, "valve_state", valve_state_val);
-        cJSON_AddNumberToObject(root, "threshold", threshold_val);
-    }
+    // Standard AWS IoT Core Flat Telemetry Schema
+    cJSON_AddStringToObject(root, "device_id", AWS_IOT_CLIENT_ID);
+    cJSON_AddNumberToObject(root, "record_id", (double)record->record_id);
+    cJSON_AddNumberToObject(root, "timestamp_ms", (double)timestamp_ms);
+    cJSON_AddNumberToObject(root, "pressure", record->pressure);
+    cJSON_AddNumberToObject(root, "temperature", record->temperature);
+    cJSON_AddNumberToObject(root, "humidity", record->humidity);
+    cJSON_AddNumberToObject(root, "battery_mv", record->battery_mv);
+    cJSON_AddNumberToObject(root, "valve_state", valve_control_get_state() ? 1 : 0);
+    cJSON_AddNumberToObject(root, "threshold", valve_control_get_threshold());
 
     char *json_string = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
@@ -203,9 +186,10 @@ esp_err_t mqtt_telemetry_publish_record(const sensor_record_t *record)
     if (!json_string) return ESP_ERR_NO_MEM;
 
     if (s_is_mqtt_connected && s_mqtt_client) {
+        // QoS 1: Guarantees delivery to AWS IoT Core with PUBACK
         int msg_id = esp_mqtt_client_publish(s_mqtt_client, s_pub_topic, json_string, 0, 1, 0);
-        ESP_LOGI(TAG, "Published Telemetry Record #%lu to '%s' (msg_id=%d): %s",
-                 record->record_id, s_pub_topic, msg_id, json_string);
+        ESP_LOGI(TAG, "Published to AWS IoT '%s' (msg_id=%d): %s",
+                 s_pub_topic, msg_id, json_string);
         free(json_string);
         return (msg_id >= 0) ? ESP_OK : ESP_FAIL;
     }
@@ -216,12 +200,13 @@ esp_err_t mqtt_telemetry_publish_record(const sensor_record_t *record)
 
 void mqtt_telemetry_task(void *pvParameters)
 {
-    ESP_LOGI(TAG, "Ubidots Telemetry Task starting on Core %d", xPortGetCoreID());
+    ESP_LOGI(TAG, "AWS IoT Telemetry Task running on Core %d", xPortGetCoreID());
     esp_task_wdt_add(NULL);
 
     while (1) {
+        // Offline Store-and-Forward backlog draining
         if (s_is_mqtt_connected && storage_get_pending_count() > 0) {
-            ESP_LOGI(TAG, "Ubidots Connection Active: Draining %lu offline backlogged records from LittleFS...",
+            ESP_LOGI(TAG, "AWS IoT Active: Draining %lu offline backlogged records from LittleFS...",
                      storage_get_pending_count());
 
             sensor_record_t backlog_record;
@@ -231,15 +216,15 @@ void mqtt_telemetry_task(void *pvParameters)
                 if (mqtt_telemetry_publish_record(&backlog_record) == ESP_OK) {
                     storage_commit_tail_advance();
                     drained_count++;
-                    vTaskDelay(pdMS_TO_TICKS(50)); // Yield to prevent buffer bloat
+                    vTaskDelay(pdMS_TO_TICKS(50)); // Yield to prevent network congestion
                 } else {
-                    ESP_LOGW(TAG, "Failed to publish backlog record #%lu to Ubidots, pausing drain", backlog_record.record_id);
+                    ESP_LOGW(TAG, "Failed to publish backlog record #%lu to AWS IoT, pausing drain", backlog_record.record_id);
                     break;
                 }
             }
 
             if (drained_count > 0) {
-                ESP_LOGI(TAG, "Successfully drained %lu offline records to Ubidots dashboard", drained_count);
+                ESP_LOGI(TAG, "Successfully drained %lu offline records to AWS IoT Core", drained_count);
             }
         }
 

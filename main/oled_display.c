@@ -416,13 +416,23 @@ void oled_display_show_message(const char *line1, const char *line2, const char 
     oled_flush_buffer();
 }
 
+static char s_fw_title[24] = "LOGGER v1.0 [GRN]";
+
+void oled_display_set_fw_version(const char *version_str)
+{
+    if (version_str) {
+        strncpy(s_fw_title, version_str, sizeof(s_fw_title) - 1);
+        s_fw_title[sizeof(s_fw_title) - 1] = '\0';
+    }
+}
+
 void oled_display_show_sensor_data(float temp, float hum, float pressure, bool valve_active)
 {
     memset(s_display_buffer, 0, sizeof(s_display_buffer));
 
-    // Header Title Bar
+    // Header Title Bar with dynamic Firmware Version badge
     oled_draw_rect(0, 0, 128, 16, true);
-    oled_draw_string(12, 4, "DATA LOGGER UI", true);
+    oled_draw_string(6, 4, s_fw_title, true);
 
     // Divider line
     oled_draw_hline(0, 127, 48, true);
